@@ -4,9 +4,9 @@ await import('./icons.mjs');
 await mkdir(new URL('../docs/',import.meta.url),{recursive:true});
 await cp(new URL('../public/',import.meta.url),new URL('../docs/',import.meta.url),{recursive:true});
 const digest=async file=>createHash('sha256').update(await readFile(new URL('../docs/'+file,import.meta.url))).digest('hex').slice(0,12);
-const pricingVersion=await digest('pricing.js'),iconVersion=await digest('icon.svg');
+const pricingVersion=await digest('pricing.js'),illustrationVersion=await digest('ac-illustrations.js'),iconVersion=await digest('icon.svg');
 const appFile=new URL('../docs/app.js',import.meta.url);
-await writeFile(appFile,(await readFile(appFile,'utf8')).replace("'./pricing.js'","'./pricing.js?v="+pricingVersion+"'").replace('/brand-mark.svg"','/brand-mark.svg?v='+iconVersion+'"'));
+await writeFile(appFile,(await readFile(appFile,'utf8')).replace("'./pricing.js'","'./pricing.js?v="+pricingVersion+"'").replace("'./ac-illustrations.js'","'./ac-illustrations.js?v="+illustrationVersion+"'").replace('/brand-mark.svg"','/brand-mark.svg?v='+iconVersion+'"'));
 const scriptVersion=await digest('app.js'),styleVersion=await digest('style.css');
 for(const page of ['customer','admin']){
  const file=new URL('../docs/'+page+'/index.html',import.meta.url);
