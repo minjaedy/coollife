@@ -1,4 +1,5 @@
 import {readCatalog,writeCatalog} from './firebase.mjs';
+import {calculateAmount,validDiscount} from '../public/pricing.js';
 const PHONE='01041663703';
 export const defaults={revision:1,business:{name:'쿨라이프',phone:PHONE,area:'서비스 지역은 상담 시 안내해 드려요.',discountNote:''},services:[
  {id:'wall',name:'벽걸이 에어컨',description:'방 안의 공기를 산뜻하게',price:null,active:true},
@@ -103,6 +104,16 @@ async function saveCatalog(request,env){
  const result=await sql(env,"INSERT INTO config(id,value) VALUES('catalog',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value WHERE CAST(json_extract(config.value,'$.revision') AS INTEGER)=?",JSON.stringify(updated),current.revision).run();
  if(!result.meta.changes)throw fail('가격표가 변경됐어요. 다시 불러와 주세요.',409);return json(updated);
 }
+async function discounts(env){return JSON.parse((await sql(env,"SELECT value FROM config WHERE id='discount_presets'").first())?.value||'{"revision":1,"presets":[]}');}
+async function saveDiscounts(request,env){
+ const data=await body(request,16000),current=await discounts(env);
+ if(data.revision!==current.revision)throw fail('할인 설정이 다른 화면에서 바뀌었어요. 다시 불러와 주세요.',409);
+ if(!Array.isArray(data.presets)||data.presets.length>20)throw fail('할인 버튼은 최대 20개까지 만들 수 있어요.');
+ const ids=new Set();const presets=data.presets.map(p=>{if(!/^[a-z0-9-]{1,40}$/.test(p.id)||ids.has(p.id)||!validDiscount(p))throw fail('할인 종류와 값을 확인해 주세요.');ids.add(p.id);return {id:p.id,name:text(p.name,40,1),type:p.type,value:p.value};});
+ const updated={revision:current.revision+1,presets};
+ const result=await sql(env,"INSERT INTO config(id,value) VALUES('discount_presets',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value WHERE CAST(json_extract(config.value,'$.revision') AS INTEGER)=?",JSON.stringify(updated),current.revision).run();
+ if(!result.meta.changes)throw fail('할인 설정이 바뀌었어요. 다시 불러와 주세요.',409);return json(updated);
+}
 async function update(request,env,id){
  const row=await sql(env,'SELECT * FROM quotes WHERE id=?',id).first();if(!row)throw fail('신청을 찾지 못했어요.',404);
  const b=await body(request,12000);if(b.revision!==row.revision)throw fail('다른 화면에서 변경됐어요. 다시 열어 주세요.',409);
@@ -110,8 +121,18 @@ async function update(request,env,id){
  let status=row.status,amount=row.amount,visit=row.visit_at,adminNote=row.admin_note,message=text(b.message||'',2000),kind=b.action;
  if(b.action==='approve'){
   if(!Number.isInteger(b.amount)||b.amount<0||b.amount>10000000)throw fail('확정 견적 금액을 입력해 주세요.');
+  let pricingLine='';
+  if(b.pricing){
+   const saved=await discounts(env),selected=b.pricing.discountId?saved.presets.find(p=>p.id===b.pricing.discountId):null;
+   if(b.pricing.discountId&&(!selected||b.pricing.discountRevision!==saved.revision))throw fail('할인 설정이 변경됐어요. 신청을 다시 열고 금액을 확인해 주세요.',409);
+   let calculated;try{calculated=calculateAmount(b.pricing.baseAmount,selected);}catch(error){throw fail(error.message);}
+   if(calculated.total!==b.amount)throw fail('최종 금액을 다시 확인해 주세요.');
+   const won=value=>value.toLocaleString('ko-KR')+'원';
+   pricingLine='\n기본 금액 '+won(calculated.base)+(selected?' · '+selected.name+' 할인 '+won(calculated.discount):'')+' · 최종 '+won(calculated.total);
+  }
   if(!validDate(b.visitDate)||b.visitDate<today()||!/^([01]\d|2[0-3]):[0-5]\d$/.test(b.visitTime||''))throw fail('방문 날짜와 시간을 확인해 주세요.');
   status='approved';amount=b.amount;visit=b.visitDate+'T'+b.visitTime+':00+09:00';message||='견적과 방문 일정이 확정됐어요. 안내된 시간에 찾아뵐게요.';
+  message+=pricingLine;
  }
  if(b.action==='status'){if(!states.includes(b.status)||b.status==='approved')throw fail('상태를 확인해 주세요.');if(b.status===row.status)return json(await present(env,row,true));status=b.status;message||=names[status]+' 상태로 변경됐어요.';}
  if(b.action==='message'&&!message)throw fail('고객에게 보낼 안내를 입력해 주세요.');
@@ -160,6 +181,8 @@ async function api(request,env){
  if(path.startsWith('/api/admin/')){
   await requireAdmin(request,env);
   if(path==='/api/admin/catalog'&&request.method==='PUT')return saveCatalog(request,env);
+  if(path==='/api/admin/discounts'&&request.method==='GET')return json(await discounts(env));
+  if(path==='/api/admin/discounts'&&request.method==='PUT')return saveDiscounts(request,env);
   if(path==='/api/admin/quotes'&&request.method==='GET'){
    const rows=(await sql(env,'SELECT q.id,reference,customer_name,phone,address,preferred_date,preferred_time,items,status,amount,visit_at,created_at,updated_at,revision,(SELECT id FROM photos WHERE quote_id=q.id LIMIT 1) AS cover_photo,(SELECT count(*) FROM photos WHERE quote_id=q.id) AS photo_count FROM quotes q ORDER BY created_at DESC LIMIT 500').all()).results;
    return json({quotes:rows.map(x=>({...x,items:JSON.parse(x.items)}))});

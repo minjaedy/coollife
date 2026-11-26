@@ -92,3 +92,24 @@ test('quick status changes preserve approval requirements and avoid duplicate hi
  const list=await (await f.call('admin/quotes','GET',null,admin)).json();assert.equal(list.quotes[0].revision,3);assert.equal(list.quotes[0].photo_count,0);
  f.env.DB.raw.close();
 });
+
+test('private discount presets support fixed/percent discounts, revision checks, and server-verified approvals',async()=>{
+ const f=fixture(),admin=await setup(f),access='7'.repeat(48);
+ assert.equal((await f.call('admin/discounts')).status,401);
+ const initial=await (await f.call('admin/discounts','GET',null,admin)).json();assert.equal(initial.revision,1);assert.deepEqual(initial.presets,[]);
+ const config={revision:1,presets:[{id:'return',name:'재방문 고객',type:'percent',value:10},{id:'event',name:'이벤트',type:'fixed',value:10000}]};
+ assert.equal((await f.call('admin/discounts','PUT',config,admin)).status,200);
+ assert.equal((await f.call('admin/discounts','PUT',config,admin)).status,409);
+ assert.equal((await f.call('admin/discounts','PUT',{revision:2,presets:[{id:'wrong',name:'잘못된 할인',type:'percent',value:101}]},admin)).status,400);
+ const publicCatalog=await (await f.call('catalog')).json();assert.equal(publicCatalog.presets,undefined);
+ const {id}=await (await f.call('quotes','POST',quote(access))).json();
+ const approval={revision:1,action:'approve',amount:144000,visitDate:tomorrow(),visitTime:'11:30',pricing:{baseAmount:160000,discountId:'return',discountRevision:2}};
+ assert.equal((await f.call('admin/quotes/'+id,'POST',{...approval,amount:1},admin)).status,400);
+ assert.equal((await f.call('admin/quotes/'+id,'POST',{...approval,pricing:{...approval.pricing,discountId:'deleted'}},admin)).status,409);
+ assert.equal((await f.call('admin/quotes/'+id,'POST',approval,admin)).status,200);
+ const customer=await (await f.call('quote','GET',null,access)).json();assert.equal(customer.amount,144000);assert.match(customer.events.at(-1).message,/재방문 고객 할인 16,000원/);assert.match(customer.events.at(-1).message,/최종 144,000원/);
+ assert.equal((await f.call('admin/discounts','PUT',{revision:2,presets:[]},admin)).status,200);
+ assert.equal((await f.call('admin/quotes/'+id,'POST',{...approval,revision:2},admin)).status,409);
+ assert.equal((await f.call('admin/quotes/'+id,'POST',{...approval,revision:2,amount:160000,pricing:{baseAmount:160000,discountId:''}},admin)).status,200);
+ f.env.DB.raw.close();
+});
