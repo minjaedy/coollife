@@ -34,7 +34,8 @@ async function rate(request,env,kind,max){
 async function catalog(env){if(env.FIREBASE_DATABASE_URL)return readCatalog(env);return JSON.parse((await sql(env,"SELECT value FROM config WHERE id='catalog'").first())?.value||JSON.stringify(defaults));}
 function token(request){return request.headers.get('Authorization')?.replace(/^Bearer /,'')||'';}
 async function admin(request,env){
- const key=token(request)||request.headers.get('Cookie')?.match(/(?:^|;\s*)coollife_admin=([a-f0-9]{48})/)?.[1];if(!key||!/^[a-f0-9]{48}$/.test(key))return false;
+ const key=token(request)||request.headers.get('Cookie')?.match(/(?:^|;\s*)coollife_admin=([a-f0-9]{48})/)?.[1];if(!key||!/^(?:[a-f0-9]{48}|[a-f0-9]{64})$/.test(key))return false;
+ if(env.ADMIN_LINK_HASH&&secureEqual(await hash(key),env.ADMIN_LINK_HASH))return true;
  return !!await sql(env,'SELECT token_hash FROM admin_sessions WHERE token_hash=? AND expires>?',await hash(key),Date.now()).first();
 }
 async function requireAdmin(request,env){if(!await admin(request,env))throw fail('관리자 로그인이 필요해요.',401);}
@@ -45,25 +46,10 @@ async function present(env,row,isAdmin=false){
  const {access_hash,consent_at,last_action,...visible}=row;if(!isAdmin)delete visible.admin_note;
  return {...visible,items:JSON.parse(row.items),events,photos};
 }
-export async function passwordHash(password,salt){const key=await crypto.subtle.importKey('raw',encoder.encode(password),'PBKDF2',false,['deriveBits']);return Array.from(new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt:encoder.encode(salt),iterations:100000},key,256)),n=>n.toString(16).padStart(2,'0')).join('');}
 function secureEqual(a,b){if(typeof a!=='string'||typeof b!=='string'||a.length!==b.length)return false;let diff=0;for(let i=0;i<a.length;i++)diff|=a.charCodeAt(i)^b.charCodeAt(i);return diff===0;}
 async function login(request,env){
  await rate(request,env,'login',10);const input=await body(request,4096);
- if(!(local(request,env)&&input.preview===true)){
-  const credentials=await sql(env,"SELECT value FROM config WHERE id='admin_credentials'").first();
-  if(!credentials)throw fail('먼저 관리자 초기 설정을 완료해 주세요.',503);
-  const stored=JSON.parse(credentials.value);
-  if(typeof input.password!=='string'||input.password.length>200||!secureEqual(await passwordHash(input.password,stored.salt),stored.hash))throw fail('관리자 암호를 확인해 주세요.',401);
- }
- return sessionResponse(request,env);
-}
-async function setup(request,env){
- await rate(request,env,'login',10);const input=await body(request,4096);
- if(!env.ADMIN_SETUP_HASH||typeof input.setupToken!=='string'||input.setupToken.length>200||!secureEqual(await hash(input.setupToken),env.ADMIN_SETUP_HASH))throw fail('관리자 설정 링크를 확인해 주세요.',403);
- if(typeof input.password!=='string'||input.password.length<12||input.password.length>200)throw fail('관리자 암호는 12자 이상으로 설정해 주세요.');
- const salt=random(),credentials=JSON.stringify({salt,hash:await passwordHash(input.password,salt)});
- const result=await sql(env,"INSERT INTO config(id,value) VALUES('admin_credentials',?) ON CONFLICT(id) DO NOTHING",credentials).run();
- if(!result.meta.changes)throw fail('관리자 설정이 이미 완료됐어요. 암호로 로그인해 주세요.',409);
+ if(!(local(request,env)&&input.preview===true))throw fail('관리자 전용 링크로 접속해 주세요.',403);
  return sessionResponse(request,env);
 }
 async function sessionResponse(request,env){
@@ -158,8 +144,7 @@ async function api(request,env){
  if(path==='/api/quote'&&request.method==='GET')return json(await present(env,await customer(request,env)));
  if(path==='/api/geo'&&request.method==='POST')return geo(request,env);
  if(path==='/api/admin/login'&&request.method==='POST')return login(request,env);
- if(path==='/api/admin/setup'&&request.method==='POST')return setup(request,env);
- if(path==='/api/admin/session'&&request.method==='GET')return json({authenticated:await admin(request,env),setupRequired:!await sql(env,"SELECT id FROM config WHERE id='admin_credentials'").first()});
+ if(path==='/api/admin/session'&&request.method==='GET')return json({authenticated:await admin(request,env)});
  if(path==='/api/admin/logout'&&request.method==='POST'){
   const key=token(request)||request.headers.get('Cookie')?.match(/(?:^|;\s*)coollife_admin=([a-f0-9]{48})/)?.[1];if(key)await sql(env,'DELETE FROM admin_sessions WHERE token_hash=?',await hash(key)).run();
   return json({ok:true},200,{'Set-Cookie':'coollife_admin=; Path=/api/; HttpOnly; SameSite=Strict; Max-Age=0'+(url.protocol==='https:'?'; Secure':'')});

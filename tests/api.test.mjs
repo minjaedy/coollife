@@ -6,26 +6,23 @@ import {storage} from '../server/local.mjs';
 const origin='https://minjaedy.github.io';
 const tomorrow=()=>{const d=new Date();d.setDate(d.getDate()+1);return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul'}).format(d);};
 function fixture(){
- const env={DB:storage(),APP_ORIGIN:origin,ADMIN_SETUP_HASH:null};
+ const env={DB:storage(),APP_ORIGIN:origin,ADMIN_LINK_HASH:null};
  const call=(path,method='GET',data,token,requestOrigin=origin)=>worker.fetch(new Request('https://coollife.test/api/'+path,{method,headers:{Origin:requestOrigin,...(data?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{})},...(data?{body:JSON.stringify(data)}:{})}),env);
  return {env,call};
 }
 const quote=(access,photos=[])=>({access,photos,name:'테스트 고객',phone:'01000000000',address:'서울특별시 중구 세종대로 110',detail:'가상 주소',note:'테스트',date:tomorrow(),time:'morning',items:[{id:'wall',quantity:1}],consent:true});
 const image={data:Buffer.from([255,216,255,224,0,0,0,0,0,0,0,0]).toString('base64')};
-async function setup(f){f.env.ADMIN_SETUP_HASH=await hash('test-only-bootstrap');const result=await f.call('admin/setup','POST',{setupToken:'test-only-bootstrap',password:'test-only-password-123'});assert.equal(result.status,200);return (await result.json()).token;}
+async function setup(f){const key='1'.repeat(64);f.env.ADMIN_LINK_HASH=await hash(key);assert.equal((await (await f.call('admin/session','GET',null,key)).json()).authenticated,true);return key;}
 
-test('production setup is secret-protected, one-time and sessions are revocable',async()=>{
- const f=fixture();f.env.ADMIN_SETUP_HASH=await hash('test-only-bootstrap');
- assert.equal((await f.call('admin/quotes')).status,401);
- assert.equal((await f.call('admin/login','POST',{preview:true})).status,503);
- assert.equal((await f.call('admin/setup','POST',{setupToken:'wrong',password:'test-only-password-123'})).status,403);
+test('private admin link grants access, public URL does not, and rotating the key revokes access',async()=>{
+ const f=fixture();assert.equal((await f.call('admin/quotes')).status,401);
+ assert.equal((await f.call('admin/login','POST',{preview:true})).status,403);
  const token=await setup(f);
- assert.equal((await f.call('admin/setup','POST',{setupToken:'test-only-bootstrap',password:'test-only-password-456'})).status,409);
  assert.equal((await f.call('admin/quotes','GET',null,token)).status,200);
- assert.equal((await f.call('admin/login','POST',{password:'wrong'})).status,401);
- assert.equal((await f.call('admin/login','POST',{password:'test-only-password-123'})).status,200);
- await f.call('admin/logout','POST',{},token);
+ assert.equal((await f.call('admin/quotes','GET',null,'2'.repeat(64))).status,401);
+ f.env.ADMIN_LINK_HASH=await hash('3'.repeat(64));
  assert.equal((await f.call('admin/quotes','GET',null,token)).status,401);
+ assert.equal((await f.call('admin/quotes','GET',null,'3'.repeat(64))).status,200);
  f.env.DB.raw.close();
 });
 test('customer records and photos are isolated; private notes never reach customers',async()=>{
