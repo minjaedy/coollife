@@ -113,7 +113,7 @@ async function update(request,env,id){
   if(!validDate(b.visitDate)||b.visitDate<today()||!/^([01]\d|2[0-3]):[0-5]\d$/.test(b.visitTime||''))throw fail('방문 날짜와 시간을 확인해 주세요.');
   status='approved';amount=b.amount;visit=b.visitDate+'T'+b.visitTime+':00+09:00';message||='견적과 방문 일정이 확정됐어요. 안내된 시간에 찾아뵐게요.';
  }
- if(b.action==='status'){if(!states.includes(b.status)||b.status==='approved')throw fail('상태를 확인해 주세요.');status=b.status;message||=names[status]+' 상태로 변경됐어요.';}
+ if(b.action==='status'){if(!states.includes(b.status)||b.status==='approved')throw fail('상태를 확인해 주세요.');if(b.status===row.status)return json(await present(env,row,true));status=b.status;message||=names[status]+' 상태로 변경됐어요.';}
  if(b.action==='message'&&!message)throw fail('고객에게 보낼 안내를 입력해 주세요.');
  if(b.action==='call_request')message||='방문 내용을 확인하려고 해요. 편하실 때 쿨라이프로 전화 부탁드려요.';
  if(b.action==='note')adminNote=text(b.note||'',3000);
@@ -152,13 +152,16 @@ async function api(request,env){
  if(path.startsWith('/api/photos/')&&request.method==='GET'){
   const photo=await sql(env,'SELECT * FROM photos WHERE id=?',path.split('/').at(-1)).first();if(!photo)throw fail('사진을 찾지 못했어요.',404);
   if(!await admin(request,env)&&(await customer(request,env)).id!==photo.quote_id)throw fail('사진을 찾지 못했어요.',404);
-  return new Response(photo.content,{headers:{'Content-Type':photo.mime,'Cache-Control':'private, no-store','Content-Disposition':'inline','X-Content-Type-Options':'nosniff'}});
+  // D1 returns BLOBs as number arrays; Response requires binary bytes.
+  const content=Array.isArray(photo.content)?Uint8Array.from(photo.content):photo.content;
+  if(!content||content.byteLength!==photo.bytes)throw fail('사진을 불러오지 못했어요. 다시 시도해 주세요.',502);
+  return new Response(content,{headers:{'Content-Type':photo.mime,'Content-Length':String(photo.bytes),'Cache-Control':'private, no-store','Content-Disposition':'inline','X-Content-Type-Options':'nosniff'}});
  }
  if(path.startsWith('/api/admin/')){
   await requireAdmin(request,env);
   if(path==='/api/admin/catalog'&&request.method==='PUT')return saveCatalog(request,env);
   if(path==='/api/admin/quotes'&&request.method==='GET'){
-   const rows=(await sql(env,'SELECT id,reference,customer_name,phone,address,preferred_date,preferred_time,items,status,amount,visit_at,created_at,updated_at FROM quotes ORDER BY created_at DESC LIMIT 500').all()).results;
+   const rows=(await sql(env,'SELECT q.id,reference,customer_name,phone,address,preferred_date,preferred_time,items,status,amount,visit_at,created_at,updated_at,revision,(SELECT id FROM photos WHERE quote_id=q.id LIMIT 1) AS cover_photo,(SELECT count(*) FROM photos WHERE quote_id=q.id) AS photo_count FROM quotes q ORDER BY created_at DESC LIMIT 500').all()).results;
    return json({quotes:rows.map(x=>({...x,items:JSON.parse(x.items)}))});
   }
   const match=path.match(/^\/api\/admin\/quotes\/([a-f0-9-]{36})$/);

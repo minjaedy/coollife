@@ -69,3 +69,26 @@ test('scheduled cleanup removes expired metadata and preserves customer requests
  assert.equal(f.env.DB.raw.prepare('SELECT count(*) AS n FROM admin_sessions').get().n,0);
  assert.equal(f.env.DB.raw.prepare('SELECT count(*) AS n FROM quotes').get().n,1);f.env.DB.raw.close();
 });
+
+test('production D1 BLOB array is returned as original image bytes',async()=>{
+ const f=fixture(),admin=await setup(f),access='f'.repeat(48);
+ await f.call('quotes','POST',quote(access,[image]));
+ const q=await (await f.call('quote','GET',null,access)).json();
+ const prepare=f.env.DB.prepare;
+ f.env.DB.prepare=statement=>{const original=prepare(statement);const bind=original.bind;original.bind=(...args)=>{const bound=bind(...args);const first=bound.first;bound.first=async()=>{const row=await first();if(row?.content)row.content=Array.from(row.content);return row;};return bound;};return original;};
+ for(const credential of [access,admin]){const response=await f.call('photos/'+q.photos[0].id,'GET',null,credential);assert.equal(response.status,200);assert.deepEqual(Buffer.from(await response.arrayBuffer()),Buffer.from(image.data,'base64'));}
+ f.env.DB.raw.close();
+});
+test('quick status changes preserve approval requirements and avoid duplicate history',async()=>{
+ const f=fixture(),admin=await setup(f),access='9'.repeat(48);
+ const {id}=await (await f.call('quotes','POST',quote(access))).json();
+ let response=await f.call('admin/quotes/'+id,'POST',{revision:1,action:'status',status:'reviewing'},admin);assert.equal(response.status,200);
+ let q=await response.json();assert.equal(q.status,'reviewing');assert.equal(q.revision,2);
+ response=await f.call('admin/quotes/'+id,'POST',{revision:2,action:'status',status:'reviewing'},admin);q=await response.json();assert.equal(q.events.length,2);assert.equal(q.revision,2);
+ assert.equal((await f.call('admin/quotes/'+id,'POST',{revision:2,action:'status',status:'approved'},admin)).status,400);
+ assert.equal((await f.call('admin/quotes/'+id,'POST',{revision:1,action:'status',status:'completed'},admin)).status,409);
+ response=await f.call('admin/quotes/'+id,'POST',{revision:2,action:'status',status:'cancelled'},admin);assert.equal(response.status,200);
+ assert.equal((await (await f.call('quote','GET',null,access)).json()).status,'cancelled');
+ const list=await (await f.call('admin/quotes','GET',null,admin)).json();assert.equal(list.quotes[0].revision,3);assert.equal(list.quotes[0].photo_count,0);
+ f.env.DB.raw.close();
+});
