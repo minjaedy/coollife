@@ -96,7 +96,7 @@ async function saveCatalog(request,env){
  const ids=new Set();const services=data.services.map(s=>{
   if(!/^[a-z0-9-]{1,40}$/.test(s.id)||ids.has(s.id))throw fail('서비스 항목을 확인해 주세요.');ids.add(s.id);
   if(s.price!==null&&(!Number.isInteger(s.price)||s.price<0||s.price>10000000))throw fail('가격은 0원 이상의 숫자로 입력해 주세요.');
-  return{id:s.id,name:text(s.name,50,1),description:text(s.description||'',100),discount:text(s.discount||'',200),price:s.price,active:s.active===true};
+  return{id:s.id,name:text(s.name,50,1),description:text(s.description||'',100),discount:text(s.discount||'',200),brandPriceNote:text(s.brandPriceNote===undefined?(current.services.find(item=>item.id===s.id)?.brandPriceNote||''):s.brandPriceNote,600),price:s.price,active:s.active===true};
  });
  const phone=cleanPhone(data.business.phone);if(!/^0\d{8,10}$/.test(phone))throw fail('대표 연락처를 확인해 주세요.');
  const updated={revision:current.revision+1,business:{name:'쿨라이프',phone,area:text(data.business.area||'',200),discountNote:text(data.business.discountNote||'',600)},services};

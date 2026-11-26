@@ -49,11 +49,15 @@ test('customer records and photos are isolated; private notes never reach custom
 });
 test('public prices start empty and admin changes include discounts with stale-write protection',async()=>{
  const f=fixture(),admin=await setup(f),initial=await (await f.call('catalog')).json();assert.ok(initial.services.every(x=>x.price===null));
- const changed=structuredClone(initial);changed.services[0].price=80000;changed.services[0].discount='2대 이상 10% 할인';changed.business.discountNote='방문 전 상담';
+ const changed=structuredClone(initial);changed.services[0].price=80000;changed.services[0].discount='2대 이상 10% 할인';changed.services[0].brandPriceNote='삼성 일부 모델: 10,000원 추가\nLG 일부 모델: 별도 견적';changed.business.discountNote='방문 전 상담';
  assert.equal((await f.call('admin/catalog','PUT',changed)).status,401);
  assert.equal((await f.call('admin/catalog','PUT',changed,admin)).status,200);
- const next=await (await f.call('catalog')).json();assert.equal(next.services[0].price,80000);assert.equal(next.services[0].discount,'2대 이상 10% 할인');assert.equal(next.business.discountNote,'방문 전 상담');
+ const next=await (await f.call('catalog')).json();assert.equal(next.services[0].price,80000);assert.equal(next.services[0].discount,'2대 이상 10% 할인');assert.equal(next.business.discountNote,'방문 전 상담');assert.equal(next.services[0].brandPriceNote,changed.services[0].brandPriceNote);
  assert.equal((await f.call('admin/catalog','PUT',changed,admin)).status,409);
+ const olderClient=structuredClone(next);delete olderClient.services[0].brandPriceNote;assert.equal((await f.call('admin/catalog','PUT',olderClient,admin)).status,200);
+ const preserved=await (await f.call('catalog')).json();assert.equal(preserved.services[0].brandPriceNote,changed.services[0].brandPriceNote);
+ const tooLong=structuredClone(preserved);tooLong.services[0].brandPriceNote='a'.repeat(601);assert.equal((await f.call('admin/catalog','PUT',tooLong,admin)).status,400);
+ preserved.services[0].brandPriceNote='';assert.equal((await f.call('admin/catalog','PUT',preserved,admin)).status,200);assert.equal((await (await f.call('catalog')).json()).services[0].brandPriceNote,'');
  f.env.DB.raw.close();
 });
 test('CORS permits the configured customer web and refuses other mutation origins',async()=>{
