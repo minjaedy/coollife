@@ -1,0 +1,12 @@
+{
+  "name":"coollife-api",
+  "main":"server/worker.mjs",
+  "compatibility_date":"2026-11-26",
+  "account_id":"06bada574d14a5e1d912f35b4645f695",
+  "workers_dev":true,
+  "d1_databases":[{"binding":"DB","database_name":"coollife-crm","database_id":"5450f5b7-4bb5-49b0-b901-b07e4538eafb"}],
+  "vars":{
+    "APP_ORIGIN":"https://minjaedy.github.io",
+    "FIREBASE_DATABASE_URL":"https://coollife-minjaedy-default-rtdb.asia-southeast1.firebasedatabase.app"
+  }
+}
