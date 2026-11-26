@@ -117,3 +117,61 @@ test('private discount presets support fixed/percent discounts, revision checks,
  assert.equal((await f.call('admin/quotes/'+id,'POST',{...approval,revision:2,amount:160000,pricing:{baseAmount:160000,discountId:''}},admin)).status,200);
  f.env.DB.raw.close();
 });
+
+test('subtype prices persist, quote snapshots are server-owned, and old clients preserve subtype settings',async()=>{
+ const f=fixture(),admin=await setup(f),initial=await (await f.call('catalog')).json();
+ const ceiling=initial.services.find(s=>s.id==='ceiling');
+ ceiling.variants.find(v=>v.id==='1way').price=80000;
+ ceiling.variants.find(v=>v.id==='4way').price=120000;
+ ceiling.variants.find(v=>v.id==='2way').active=false;
+ ceiling.variants.push({id:'custom',name:'관리자 추가 종류',price:150000,active:true});
+ assert.equal((await f.call('admin/catalog','PUT',initial,admin)).status,200);
+ const saved=await (await f.call('catalog')).json();
+ assert.deepEqual(saved.services.find(s=>s.id==='ceiling').variants,ceiling.variants);
+ const access='8'.repeat(48),request=quote(access);
+ request.items=[{id:'ceiling',variantId:'1way',quantity:2,price:1,name:'위조 이름'},{id:'ceiling',variantId:'4way',quantity:1}];
+ const created=await f.call('quotes','POST',request);assert.equal(created.status,201);const {id}=await created.json();
+ const own=await (await f.call('quote','GET',null,access)).json(),review=await (await f.call('admin/quotes/'+id,'GET',null,admin)).json();
+ assert.deepEqual(own.items,review.items);assert.equal(own.items[0].price,80000);assert.equal(own.items[0].quantity,2);
+ assert.match(own.items[0].name,/1WAY/);assert.equal(own.items[0].unit,'대');assert.match(own.items[1].name,/4WAY/);
+ const oldClient=structuredClone(saved);oldClient.services.forEach(s=>delete s.variants);
+ assert.equal((await f.call('admin/catalog','PUT',oldClient,admin)).status,200);
+ const preserved=await (await f.call('catalog')).json();assert.deepEqual(preserved.services.find(s=>s.id==='ceiling').variants,ceiling.variants);
+ assert.equal((await f.call('admin/catalog','PUT',saved,admin)).status,409);
+ preserved.services.find(s=>s.id==='ceiling').variants[0].price=90000;
+ assert.equal((await f.call('admin/catalog','PUT',preserved,admin)).status,200);
+ assert.equal((await (await f.call('quote','GET',null,access)).json()).items[0].price,80000);
+ f.env.DB.raw.close();
+});
+
+test('subtype requests reject duplicate, hidden and invalid choices, while unknown and legacy requests remain possible',async()=>{
+ const f=fixture(),admin=await setup(f),catalog=await (await f.call('catalog')).json();
+ catalog.services.find(s=>s.id==='ceiling').variants.find(v=>v.id==='2way').active=false;
+ await f.call('admin/catalog','PUT',catalog,admin);
+ for(const items of [
+  [{id:'ceiling',variantId:'1way',quantity:1},{id:'ceiling',variantId:'1way',quantity:2}],
+  [{id:'ceiling',variantId:'2way',quantity:1}],
+  [{id:'ceiling',variantId:'windfree',quantity:1}],
+  [{id:'ceiling',variantId:'does-not-exist',quantity:1}],
+  [{id:'ceiling',variantId:4,quantity:1}],
+  [null]
+ ])assert.equal((await f.call('quotes','POST',{...quote(crypto.randomUUID().replaceAll('-','')+'0'.repeat(16)),items})).status,400);
+ const access='6'.repeat(48),unknown={...quote(access),items:[{id:'ceiling',variantId:'unknown',quantity:1}]};
+ assert.equal((await f.call('quotes','POST',unknown)).status,201);
+ const own=await (await f.call('quote','GET',null,access)).json();assert.equal(own.items[0].price,null);assert.match(own.items[0].name,/종류를 모르겠어요/);
+ assert.equal((await f.call('quotes','POST',quote('5'.repeat(48)))).status,201);
+ f.env.DB.raw.close();
+});
+
+test('catalog rejects ambiguous or invalid subtype definitions',async()=>{
+ const f=fixture(),admin=await setup(f),initial=await (await f.call('catalog')).json();
+ for(const mutate of [
+  s=>s.variants.push({...s.variants[0]}),
+  s=>s.variants[0].id='unknown',
+  s=>s.variants[0].price=-1,
+  s=>s.variants[0].name='',
+  s=>s.variants=[],
+  s=>s.variants=Array.from({length:21},(_,i)=>({id:'v-'+i,name:'종류',price:null,active:true}))
+ ]){const data=structuredClone(initial);mutate(data.services[0]);assert.equal((await f.call('admin/catalog','PUT',data,admin)).status,400);}
+ f.env.DB.raw.close();
+});

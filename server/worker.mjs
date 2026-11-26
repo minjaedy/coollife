@@ -1,5 +1,5 @@
 import {readCatalog,writeCatalog} from './firebase.mjs';
-import {calculateAmount,validDiscount} from '../public/pricing.js';
+import {calculateAmount,validDiscount,serviceVariants,withVariants,itemKey,itemUnit,UNKNOWN_VARIANT,UNKNOWN_LABEL} from '../public/pricing.js';
 const PHONE='01041663703';
 export const defaults={revision:1,business:{name:'쿨라이프',phone:PHONE,area:'서비스 지역은 상담 시 안내해 드려요.',discountNote:''},services:[
  {id:'wall',name:'벽걸이 에어컨',description:'방 안의 공기를 산뜻하게',price:null,active:true},
@@ -32,7 +32,7 @@ async function rate(request,env,kind,max){
  const row=await sql(env,'INSERT INTO limits(id,count,expires) VALUES(?,1,?) ON CONFLICT(id) DO UPDATE SET count=count+1 RETURNING count',key,now+span).first();
  if(row.count>max)throw fail('요청이 많아요. 잠시 후 다시 시도해 주세요.',429);
 }
-async function catalog(env){if(env.FIREBASE_DATABASE_URL)return readCatalog(env);return JSON.parse((await sql(env,"SELECT value FROM config WHERE id='catalog'").first())?.value||JSON.stringify(defaults));}
+async function catalog(env){const value=env.FIREBASE_DATABASE_URL?await readCatalog(env):JSON.parse((await sql(env,"SELECT value FROM config WHERE id='catalog'").first())?.value||JSON.stringify(defaults));return withVariants(value);}
 function token(request){return request.headers.get('Authorization')?.replace(/^Bearer /,'')||'';}
 async function admin(request,env){
  const key=token(request)||request.headers.get('Cookie')?.match(/(?:^|;\s*)coollife_admin=([a-f0-9]{48})/)?.[1];if(!key||!/^(?:[a-f0-9]{48}|[a-f0-9]{64})$/.test(key))return false;
@@ -75,8 +75,14 @@ async function create(request,env){
  if(b.consent!==true)throw fail('견적 상담을 위한 정보 제공에 동의해 주세요.');
  if(!validDate(b.date)||b.date<today()||Date.parse(b.date)>Date.now()+370*86400000)throw fail('희망 날짜를 확인해 주세요.');
  if(!['flexible','morning','afternoon'].includes(b.time))throw fail('희망 시간대를 선택해 주세요.');
- if(!Array.isArray(b.items)||!b.items.length||b.items.length>12||new Set(b.items.map(x=>x.id)).size!==b.items.length)throw fail('세척할 에어컨을 선택해 주세요.');
- const items=b.items.map(item=>{const service=c.services.find(x=>x.id===item.id&&x.active);if(!service||!Number.isInteger(item.quantity)||item.quantity<1||item.quantity>20)throw fail('선택한 에어컨과 수량을 확인해 주세요.');return{id:service.id,name:service.name,quantity:item.quantity,price:service.price};});
+ if(!Array.isArray(b.items)||!b.items.length||b.items.length>40||b.items.some(x=>!x||typeof x.id!=='string'||(x.variantId!==undefined&&typeof x.variantId!=='string'))||new Set(b.items.map(x=>itemKey(x.id,x.variantId))).size!==b.items.length)throw fail('세척할 에어컨을 선택해 주세요.');
+ const items=b.items.map(item=>{
+  const service=c.services.find(x=>x.id===item.id&&x.active);if(!service||!Number.isInteger(item.quantity)||item.quantity<1||item.quantity>20)throw fail('선택한 에어컨과 수량을 확인해 주세요.');
+  if(item.variantId===undefined)return{id:service.id,name:service.name,quantity:item.quantity,price:service.price};
+  const unknown=item.variantId===UNKNOWN_VARIANT,variant=service.variants.find(v=>v.id===item.variantId&&v.active);
+  if(!unknown&&!variant)throw fail('선택한 세부 종류가 변경됐어요. 종류를 다시 확인해 주세요.');
+  return{id:service.id,variantId:item.variantId,variantName:unknown?UNKNOWN_LABEL:variant.name,name:service.name+' · '+(unknown?UNKNOWN_LABEL:variant.name),quantity:item.quantity,unit:itemUnit(service.id),price:unknown?null:variant.price};
+ });
  const lat=b.lat??null,lng=b.lng??null;if((lat!==null||lng!==null)&&!(Number.isFinite(lat)&&Number.isFinite(lng)&&lat>=32&&lat<=40&&lng>=123&&lng<=133))throw fail('지도에서 국내 방문 위치를 확인해 주세요.');
  if(!Array.isArray(b.photos)||b.photos.length>3)throw fail('사진은 최대 3장까지 첨부해 주세요.');
  const photos=b.photos.map(photo);
@@ -90,13 +96,16 @@ async function create(request,env){
  return json({id,reference},201);
 }
 async function saveCatalog(request,env){
- const data=await body(request,20000),remote=env.FIREBASE_DATABASE_URL?await readCatalog(env,true):null,current=remote?.value||await catalog(env);
+ const data=await body(request,160000),remote=env.FIREBASE_DATABASE_URL?await readCatalog(env,true):null,current=withVariants(remote?.value||await catalog(env));
  if(data.revision!==current.revision)throw fail('다른 화면에서 가격표가 바뀌었어요. 새로고침 후 다시 저장해 주세요.',409);
  if(!Array.isArray(data.services)||data.services.length<1||data.services.length>20)throw fail('서비스는 1~20개까지 등록할 수 있어요.');
  const ids=new Set();const services=data.services.map(s=>{
   if(!/^[a-z0-9-]{1,40}$/.test(s.id)||ids.has(s.id))throw fail('서비스 항목을 확인해 주세요.');ids.add(s.id);
   if(s.price!==null&&(!Number.isInteger(s.price)||s.price<0||s.price>10000000))throw fail('가격은 0원 이상의 숫자로 입력해 주세요.');
-  return{id:s.id,name:text(s.name,50,1),description:text(s.description||'',100),discount:text(s.discount||'',200),brandPriceNote:text(s.brandPriceNote===undefined?(current.services.find(item=>item.id===s.id)?.brandPriceNote||''):s.brandPriceNote,600),price:s.price,active:s.active===true};
+  const previous=current.services.find(item=>item.id===s.id),input=s.variants===undefined?serviceVariants(previous||s):s.variants;
+  if(!Array.isArray(input)||input.length<1||input.length>20)throw fail('세부 종류는 항목마다 1~20개까지 등록해 주세요.');
+  const variantIds=new Set();const variants=input.map(v=>{if(!v||!/^[a-z0-9-]{1,40}$/.test(v.id)||v.id===UNKNOWN_VARIANT||variantIds.has(v.id))throw fail('세부 종류 항목을 확인해 주세요.');variantIds.add(v.id);if(v.price!==null&&(!Number.isInteger(v.price)||v.price<0||v.price>10000000))throw fail('세부 종류 가격은 0원 이상의 숫자로 입력해 주세요.');return{id:v.id,name:text(v.name,60,1),price:v.price,active:v.active===true};});
+  return{id:s.id,name:text(s.name,50,1),description:text(s.description||'',100),discount:text(s.discount||'',200),brandPriceNote:text(s.brandPriceNote===undefined?(previous?.brandPriceNote||''):s.brandPriceNote,600),price:s.price,active:s.active===true,variants};
  });
  const phone=cleanPhone(data.business.phone);if(!/^0\d{8,10}$/.test(phone))throw fail('대표 연락처를 확인해 주세요.');
  const updated={revision:current.revision+1,business:{name:'쿨라이프',phone,area:text(data.business.area||'',200),discountNote:text(data.business.discountNote||'',600)},services};
